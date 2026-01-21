@@ -97,8 +97,10 @@ def main():
     df_predictions = run_inference(
         embeddings=embeddings,
         artifacts=artifacts,
+        descriptions=descriptions,
         subcategory_threshold=subcategory_threshold,
         type_threshold=type_threshold,
+        apply_overrides=True,
     )
 
     # Combine input with predictions

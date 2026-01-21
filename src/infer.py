@@ -2,11 +2,90 @@
 
 import json
 import os
+import re
 from typing import Dict, Any, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
 import joblib
+
+
+# Post-processing rules to correct obvious Miscellaneous misclassifications
+# Each rule: (sector_override, keywords_must_have, keywords_must_not_have)
+SECTOR_OVERRIDE_RULES = [
+    # Self Build: dwelling/house indicators (not multi-unit)
+    {
+        "sector": "Self Build",
+        "must_have": [r"\b(dwelling|house|bungalow|cottage)\b"],
+        "must_not_have": [r"\b(change of use|apartments|units|\d+\s*no\.?\s*(dwelling|house|unit)s?)\b"],
+        "description": "Single dwelling detected",
+    },
+    # Residential: multiple dwellings/apartments
+    {
+        "sector": "Residential",
+        "must_have": [r"\b(\d+\s*no\.?\s*(dwelling|house|unit|apartment)s?|apartments|multiple\s+dwelling)\b"],
+        "must_not_have": [r"\b(change of use from|retention of)\b"],
+        "description": "Multiple residential units detected",
+    },
+    # Social: museum, church, community, sport facilities
+    {
+        "sector": "Social",
+        "must_have": [r"\b(museum|church|community\s+(centre|hall)|sports?\s*(club|facility|ground)|gaa|rugby|soccer|football\s+club)\b"],
+        "must_not_have": [],
+        "description": "Social/community facility detected",
+    },
+    # Education: school, college, university
+    {
+        "sector": "Education",
+        "must_have": [r"\b(school|college|university|classroom|education)\b"],
+        "must_not_have": [],
+        "description": "Education facility detected",
+    },
+    # Civil: carpark, road infrastructure
+    {
+        "sector": "Civil",
+        "must_have": [r"\b(carpark|car\s*park|road\s+(construction|widening)|roundabout|junction\s+improvement)\b"],
+        "must_not_have": [],
+        "description": "Civil infrastructure detected",
+    },
+    # Agriculture: farm, agricultural
+    {
+        "sector": "Agriculture",
+        "must_have": [r"\b(farm\s*(building|shed)|agricultural\s*(shed|building)|cattle|slatted|silage|hay\s*barn)\b"],
+        "must_not_have": [],
+        "description": "Agricultural facility detected",
+    },
+]
+
+
+def apply_sector_override(description: str, predicted_sector: str, confidence: float) -> Tuple[str, str]:
+    """
+    Apply post-processing rules to correct obvious Miscellaneous misclassifications.
+    
+    Returns: (corrected_sector, override_note or empty string)
+    """
+    if predicted_sector != "Miscellaneous":
+        return predicted_sector, ""
+    
+    desc_lower = description.lower()
+    
+    for rule in SECTOR_OVERRIDE_RULES:
+        # Check must_have patterns (any match)
+        has_required = any(re.search(pattern, desc_lower) for pattern in rule["must_have"])
+        
+        if not has_required:
+            continue
+        
+        # Check must_not_have patterns (none should match)
+        has_excluded = any(re.search(pattern, desc_lower) for pattern in rule["must_not_have"])
+        
+        if has_excluded:
+            continue
+        
+        # Rule matches - override the prediction
+        return rule["sector"], f"Override: {rule['description']}"
+    
+    return predicted_sector, ""
 
 
 def load_artifacts(model_dir: str) -> Dict[str, Any]:
@@ -59,11 +138,21 @@ def predict_with_confidence(
 def run_inference(
     embeddings: np.ndarray,
     artifacts: Dict[str, Any],
+    descriptions: List[str] = None,
     subcategory_threshold: float = 0.60,
     type_threshold: float = 0.60,
+    apply_overrides: bool = True,
 ) -> pd.DataFrame:
     """
     Run gated hierarchical inference.
+    
+    Args:
+        embeddings: Feature embeddings
+        artifacts: Loaded model artifacts
+        descriptions: Original text descriptions (for post-processing rules)
+        subcategory_threshold: Confidence threshold for subcategory
+        type_threshold: Confidence threshold for type
+        apply_overrides: Whether to apply post-processing rules for Misc corrections
 
     Returns DataFrame with prediction columns.
     """
@@ -86,6 +175,19 @@ def run_inference(
         artifacts["sector"]["encoder"],
         embeddings,
     )
+    
+    # Apply post-processing overrides if descriptions provided
+    if apply_overrides and descriptions is not None:
+        for i in range(n):
+            corrected_sector, override_note = apply_sector_override(
+                descriptions[i], 
+                sector_preds[i], 
+                sector_confs[i]
+            )
+            if corrected_sector != sector_preds[i]:
+                sector_preds[i] = corrected_sector
+                results["notes"][i] = override_note
+    
     results["pred_sector"] = sector_preds
     results["pred_sector_conf"] = np.round(sector_confs, 4)
 
