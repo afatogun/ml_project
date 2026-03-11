@@ -19,7 +19,7 @@ artifacts/
 data/raw/*.xlsx
 data/processed/
 reports/
-
+data/
 # IDE
 .vscode/
 .idea/
@@ -29,3 +29,7 @@ reports/
 # OS
 .DS_Store
 Thumbs.db
+
+
+*.csv
+*.xlsx
