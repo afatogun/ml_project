@@ -10,6 +10,21 @@ import pandas as pd
 import joblib
 
 
+# Valid sector → subcategory mapping
+SECTOR_SUBCATEGORIES = {
+    "Agriculture": ["Agricultural Building"],
+    "Civil": ["Carpark", "Power Generation", "Quarry", "Road & Path", "Transport", "Water & Sewerage"],
+    "Commercial & Retail": ["Bar & Restaurant", "Car Showroom", "Hotel & Guesthouse", "Office", "Retail", "Service Station"],
+    "Education": ["Pre School", "School", "University"],
+    "Industrial": ["Data Centre", "Factory", "Light Industrial", "Warehouse"],
+    "Medical": ["Care Home", "Hospital", "Medical Centre"],
+    "Residential": ["Apartments", "Houses", "Mixed Development", "Student Accommodation"],
+    "Self Build": ["Alteration", "Extension", "House"],
+    "Social": ["Church & Community", "Public Building", "Sport & Leisure"],
+    "Supply & Services": ["Construction Supplies", "Professional Services"],
+}
+
+
 # Post-processing rules to correct obvious Miscellaneous misclassifications
 # Each rule: (sector_override, keywords_must_have, keywords_must_not_have)
 SECTOR_OVERRIDE_RULES = [
@@ -61,30 +76,30 @@ SECTOR_OVERRIDE_RULES = [
 def apply_sector_override(description: str, predicted_sector: str, confidence: float) -> Tuple[str, str]:
     """
     Apply post-processing rules to correct obvious Miscellaneous misclassifications.
-    
+
     Returns: (corrected_sector, override_note or empty string)
     """
     if predicted_sector != "Miscellaneous":
         return predicted_sector, ""
-    
+
     desc_lower = description.lower()
-    
+
     for rule in SECTOR_OVERRIDE_RULES:
         # Check must_have patterns (any match)
         has_required = any(re.search(pattern, desc_lower) for pattern in rule["must_have"])
-        
+
         if not has_required:
             continue
-        
+
         # Check must_not_have patterns (none should match)
         has_excluded = any(re.search(pattern, desc_lower) for pattern in rule["must_not_have"])
-        
+
         if has_excluded:
             continue
-        
+
         # Rule matches - override the prediction
         return rule["sector"], f"Override: {rule['description']}"
-    
+
     return predicted_sector, ""
 
 
@@ -135,6 +150,34 @@ def predict_with_confidence(
     return predictions, confidence
 
 
+def predict_constrained_subcategory(
+    proba_row: np.ndarray,
+    encoder,
+    valid_subcategories: List[str],
+) -> Tuple[Optional[str], float]:
+    """
+    Pick the highest-confidence subcategory that is valid for the given sector.
+
+    Args:
+        proba_row: 1-D probability vector for one sample
+        encoder: LabelEncoder used for subcategory
+        valid_subcategories: list of allowed subcategory names for this sector
+
+    Returns: (best_valid_subcategory or None, confidence)
+    """
+    all_classes = encoder.classes_
+    # Build mask of valid class indices
+    valid_indices = [i for i, cls in enumerate(all_classes) if cls in valid_subcategories]
+    if not valid_indices:
+        return None, 0.0
+
+    # Get probabilities only for valid classes
+    valid_probs = proba_row[valid_indices]
+    best_local = np.argmax(valid_probs)
+    best_idx = valid_indices[best_local]
+    return all_classes[best_idx], float(proba_row[best_idx])
+
+
 def run_inference(
     embeddings: np.ndarray,
     artifacts: Dict[str, Any],
@@ -145,7 +188,7 @@ def run_inference(
 ) -> pd.DataFrame:
     """
     Run gated hierarchical inference.
-    
+
     Args:
         embeddings: Feature embeddings
         artifacts: Loaded model artifacts
@@ -175,46 +218,54 @@ def run_inference(
         artifacts["sector"]["encoder"],
         embeddings,
     )
-    
+
     # Apply post-processing overrides if descriptions provided
     if apply_overrides and descriptions is not None:
         for i in range(n):
             corrected_sector, override_note = apply_sector_override(
-                descriptions[i], 
-                sector_preds[i], 
+                descriptions[i],
+                sector_preds[i],
                 sector_confs[i]
             )
             if corrected_sector != sector_preds[i]:
                 sector_preds[i] = corrected_sector
                 results["notes"][i] = override_note
-    
+
     results["pred_sector"] = sector_preds
     results["pred_sector_conf"] = np.round(sector_confs, 4)
 
-    # 2. Subcategory prediction (gated)
+    # 2. Subcategory prediction (gated, constrained to sector)
     if artifacts["subcategory"]["model"] is not None:
-        subcat_preds, subcat_confs = predict_with_confidence(
-            artifacts["subcategory"]["model"],
-            artifacts["subcategory"]["encoder"],
-            embeddings,
-        )
+        subcat_model = artifacts["subcategory"]["model"]
+        subcat_encoder = artifacts["subcategory"]["encoder"]
+        subcat_proba = subcat_model.predict_proba(embeddings)
 
         for i in range(n):
             notes = []
+            sector = sector_preds[i]
 
-            # Gate: if sector is Miscellaneous, skip subcategory
-            if sector_preds[i] and sector_preds[i].lower() == "miscellaneous":
+            # Gate: if sector is Miscellaneous or not in the mapping, skip subcategory
+            if not sector or sector not in SECTOR_SUBCATEGORIES:
                 results["pred_subcategory"][i] = None
                 results["pred_subcategory_conf"][i] = 0.0
-                notes.append("Subcategory skipped: Sector is Miscellaneous")
-            # Gate: confidence threshold
-            elif subcat_confs[i] < subcategory_threshold:
-                results["pred_subcategory"][i] = None
-                results["pred_subcategory_conf"][i] = round(subcat_confs[i], 4)
-                notes.append(f"Subcategory below threshold ({subcat_confs[i]:.2f} < {subcategory_threshold})")
+                if sector and sector.lower() == "miscellaneous":
+                    notes.append("Subcategory skipped: Sector is Miscellaneous")
+                elif sector:
+                    notes.append(f"Subcategory skipped: no valid subcategories for {sector}")
             else:
-                results["pred_subcategory"][i] = subcat_preds[i]
-                results["pred_subcategory_conf"][i] = round(subcat_confs[i], 4)
+                # Constrained prediction: only pick from valid subcategories for this sector
+                valid_subs = SECTOR_SUBCATEGORIES[sector]
+                best_sub, best_conf = predict_constrained_subcategory(
+                    subcat_proba[i], subcat_encoder, valid_subs
+                )
+
+                if best_sub is None or best_conf < subcategory_threshold:
+                    results["pred_subcategory"][i] = None
+                    results["pred_subcategory_conf"][i] = round(best_conf, 4) if best_sub else 0.0
+                    notes.append(f"Subcategory below threshold ({best_conf:.2f} < {subcategory_threshold})")
+                else:
+                    results["pred_subcategory"][i] = best_sub
+                    results["pred_subcategory_conf"][i] = round(best_conf, 4)
 
             if notes:
                 results["notes"][i] = "; ".join(notes) if not results["notes"][i] else results["notes"][i] + "; " + "; ".join(notes)
