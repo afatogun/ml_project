@@ -138,6 +138,28 @@ def evaluate_all(
         else:
             results[split_name]["type"] = {"accuracy": None, "macro_f1": None, "n_samples": 0}
 
+        # Tag (all rows, binary: "garage" vs "none")
+        if classifiers.get("tag") and classifiers["tag"]["model"] is not None:
+            tag_labels_all = df["tag"].fillna("none").values
+            tag_metrics = evaluate_classifier(
+                classifiers["tag"]["model"],
+                classifiers["tag"]["encoder"],
+                emb,
+                tag_labels_all,
+            )
+            results[split_name]["tag"] = tag_metrics
+
+            cm_tag = compute_confusion_matrix(
+                classifiers["tag"]["model"],
+                classifiers["tag"]["encoder"],
+                emb,
+                tag_labels_all,
+            )
+            if cm_tag is not None:
+                cm_tag.to_csv(os.path.join(reports_dir, f"confusion_tag_{split_name}.csv"))
+        else:
+            results[split_name]["tag"] = {"accuracy": None, "macro_f1": None, "n_samples": 0}
+
     return results
 
 

@@ -1,15 +1,23 @@
 # Project Classification with OpenAI Embeddings
 
-Train and batch-predict project classifications (Sector, Subcategory, Type) using OpenAI embeddings and lightweight classifiers.
+Train and batch-predict project classifications (Sector, Subcategory, Type, Tag) using OpenAI embeddings and lightweight classifiers.
 
 ## Features
 
-- **OpenAI Embeddings**: Uses `text-embedding-3-small` (configurable) for semantic representations
+- **OpenAI Embeddings**: Uses `text-embedding-3-large` by default (configurable) for semantic representations
 - **Gated Hierarchical Classification**:
   - Sector classifier (always predicts)
   - Subcategory classifier (skipped if Sector=Miscellaneous or confidence below threshold)
   - Type classifier (skipped if confidence below threshold)
+- **Tag Classification**:
+  - Tag classifier trained as a real ML target
+  - Current valid tag: `garage`
+  - Predicted only when model predicts `garage` above confidence threshold
 - **Batch Processing**: Rate-limit friendly with exponential backoff retries
+- **Irish Translation (Optional)**:
+  - If text is Irish, translate to English via OpenAI before embedding/classification
+  - If text is English, no translation is applied
+  - Preserves original text and sets `translation_applied` flag
 - **Reproducibility**: Deterministic seeds, data hashing, model versioning
 
 ## Project Structure
@@ -18,9 +26,10 @@ Train and batch-predict project classifications (Sector, Subcategory, Type) usin
 ml_project/
 ├── train.py                 # Training entry point
 ├── predict_xlsx.py          # Batch prediction entry point
+├── clean_misc_mislabeled.py # Remove likely mislabeled Miscellaneous rows
 ├── src/
 │   ├── __init__.py
-│   ├── openai_embeddings.py # Batch embed with retries
+│   ├── openai_embeddings.py # Batch embed + Irish translation with retries
 │   ├── preprocess.py        # Data loading and normalization
 │   ├── train_models.py      # Model training utilities
 │   ├── metrics.py           # Evaluation and reporting
@@ -56,17 +65,28 @@ cp .env.example .env
 
 ### Input Format
 
-Training XLSX must have columns:
+Training dataset (XLSX or CSV) must have columns:
 - `id`: Unique identifier
 - `Sector`: Primary category (required)
 - `subcategory`: Secondary category (optional)
 - `type`: Tertiary category (optional)
 - `Description`: Text description for embedding
+- `tag`: Optional tag target (currently only `garage` is valid)
+
+### Optional cleaning step (recommended)
+
+```bash
+python clean_misc_mislabeled.py \
+  --train_xlsx ./data/raw/2025_classification_training_set.xlsx \
+  --cleaned_output ./data/raw/2025_classification_training_set.cleaned.xlsx \
+  --removed_output ./data/raw/misc_removed.csv \
+  --confidence_threshold 0.8
+```
 
 ### Command
 
 ```bash
-python train.py --train_xlsx ./data/raw/2025_classification_training_set.xlsx
+python train.py --train_xlsx ./data/raw/2025_classification_training_set.cleaned.xlsx --test_size 0.10
 ```
 
 ### Options
@@ -74,12 +94,16 @@ python train.py --train_xlsx ./data/raw/2025_classification_training_set.xlsx
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--train_xlsx` | (required) | Path to training XLSX |
-| `--embedding_model` | `text-embedding-3-small` | OpenAI embedding model |
+| `--embedding_model` | `text-embedding-3-large` | OpenAI embedding model |
+| `--classifier` | `lightgbm` | Classifier (`lightgbm`, `random_forest`, `logistic`) |
 | `--batch_size` | `100` | Texts per API call |
 | `--output_dir` | `./artifacts` | Model artifacts directory |
 | `--reports_dir` | `./reports` | Evaluation reports directory |
 | `--subcategory_threshold` | `0.60` | Confidence threshold for subcategory |
 | `--type_threshold` | `0.60` | Confidence threshold for type |
+| `--tag_threshold` | `0.60` | Confidence threshold for tag |
+| `--test_size` | `0.10` | Holdout fraction for evaluation |
+| `--translate` | `False` | Enable Irish-to-English translation before training |
 
 ### Output
 
@@ -87,6 +111,7 @@ python train.py --train_xlsx ./data/raw/2025_classification_training_set.xlsx
   - `sector_model.joblib`, `sector_encoder.joblib`
   - `subcategory_model.joblib`, `subcategory_encoder.joblib`
   - `type_model.joblib`, `type_encoder.joblib`
+  - `tag_model.joblib`, `tag_encoder.joblib`
   - `metadata.json`: Configuration and metrics
 - `./reports/`: Confusion matrices (CSV)
 
@@ -94,7 +119,7 @@ python train.py --train_xlsx ./data/raw/2025_classification_training_set.xlsx
 
 ### Input Format
 
-Scoring XLSX must have columns:
+Scoring file (XLSX or CSV) must have columns:
 - `id`: Unique identifier
 - `description`: Text description for embedding
 
@@ -117,6 +142,8 @@ python predict_xlsx.py \
 | `--batch_size` | `100` | Texts per API call |
 | `--subcategory_threshold` | (from model) | Override confidence threshold |
 | `--type_threshold` | (from model) | Override confidence threshold |
+| `--tag_threshold` | (from model) | Override tag confidence threshold |
+| `--translate` | `False` | Enable Irish-to-English translation before prediction |
 
 ### Output Columns
 
@@ -130,6 +157,10 @@ python predict_xlsx.py \
 | `pred_subcategory_conf` | Subcategory confidence (0-1) |
 | `pred_type` | Predicted type (or null) |
 | `pred_type_conf` | Type confidence (0-1) |
+| `pred_tag` | Predicted tag (or null) |
+| `pred_tag_conf` | Tag confidence (0-1) |
+| `description_original` | Original text (when translation enabled) |
+| `translation_applied` | Translation flag (when translation enabled) |
 | `notes` | Gating/threshold notes |
 | `model_version` | Run ID of model used |
 
@@ -141,17 +172,25 @@ python predict_xlsx.py \
    - Skipped if confidence < threshold (note added)
 3. **Type**:
    - Skipped if confidence < threshold (note added)
+4. **Tag**:
+  - Predicted only when model predicts `garage` and confidence >= threshold
+  - Otherwise returned as null
 
 ## Example Workflow
 
 ```bash
-# 1. Train models
-python train.py --train_xlsx ./data/raw/2025_classification_training_set.xlsx
+# 1. Clean mislabeled Miscellaneous rows
+python clean_misc_mislabeled.py \
+  --train_xlsx ./data/raw/2025_classification_training_set.xlsx \
+  --cleaned_output ./data/raw/2025_classification_training_set.cleaned.xlsx
 
-# 2. Check artifacts
+# 2. Train models with 90/10 split
+python train.py --train_xlsx ./data/raw/2025_classification_training_set.cleaned.xlsx --test_size 0.10
+
+# 3. Check artifacts
 ls ./artifacts/
 
-# 3. Run predictions
+# 4. Run predictions
 python predict_xlsx.py \
     --model_dir ./artifacts/20260119_143022 \
     --input_xlsx ./data/raw/new_projects.xlsx \

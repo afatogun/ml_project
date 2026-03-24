@@ -122,7 +122,7 @@ def train_all_classifiers(
     classifier_type: str = "lightgbm",
 ) -> Dict[str, Any]:
     """
-    Train all 3 classifiers using training split.
+    Train all 4 classifiers using training split.
 
     Returns dict with models and encoders.
     """
@@ -159,10 +159,24 @@ def train_all_classifiers(
             classifier_type=classifier_type,
         )
 
+    # 4. Tag classifier (binary: "garage" vs "none" on ALL rows)
+    #    Training only on garage-labelled rows would create a single-class model
+    #    that predicts "garage" for everything. Instead train on all rows.
+    tag_model, tag_le = None, None
+    if train_df["tag"].notna().sum() > 0:
+        print(f"    Training tag classifier ({classifier_type})...")
+        tag_labels = train_df["tag"].fillna("none").values
+        tag_model, tag_le = train_classifier(
+            train_emb,
+            tag_labels,
+            classifier_type=classifier_type,
+        )
+
     return {
         "sector": {"model": sector_model, "encoder": sector_le},
         "subcategory": {"model": subcat_model, "encoder": subcat_le},
         "type": {"model": type_model, "encoder": type_le},
+        "tag": {"model": tag_model, "encoder": tag_le},
     }
 
 

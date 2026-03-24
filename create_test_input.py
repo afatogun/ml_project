@@ -83,6 +83,8 @@ def main():
     print(f"  Sectors: {test_df['sector'].nunique()}")
     print(f"  Subcategories: {test_df['subcategory'].nunique()} (non-null: {test_df['subcategory'].notna().sum()})")
     print(f"  Types: {test_df['type'].nunique()} (non-null: {test_df['type'].notna().sum()})")
+    if "tag" in test_df.columns:
+        print(f"  Tags: {test_df['tag'].nunique()} (non-null: {test_df['tag'].notna().sum()})")
 
     print("\nNext steps:")
     print(f"  1. Run predictions:")

@@ -24,9 +24,14 @@ def load_and_merge(predictions_path: str, truth_path: str) -> pd.DataFrame:
     pred_df.columns = [c.strip().lower() for c in pred_df.columns]
     truth_df.columns = [c.strip().lower() for c in truth_df.columns]
 
+    # Determine which columns exist in truth_df for merging
+    truth_cols = ["id", "sector", "subcategory", "type"]
+    if "tag" in truth_df.columns:
+        truth_cols.append("tag")
+
     # Merge on id
     merged = pred_df.merge(
-        truth_df[["id", "sector", "subcategory", "type"]],
+        truth_df[truth_cols],
         on="id",
         suffixes=("_pred", "_true"),
     )
@@ -162,21 +167,47 @@ def main():
     else:
         print("\n  TYPE: No eligible samples")
 
+    # Evaluate Tag (only where true tag exists)
+    tag_mask = df["tag"].notna() if "tag" in df.columns else pd.Series([False] * len(df))
+    tag_results = None
+    if tag_mask.sum() > 0 and "pred_tag" in df.columns:
+        tag_results = evaluate_column(
+            df,
+            pred_col="pred_tag",
+            true_col="tag",
+            name="Tag",
+            eligible_mask=tag_mask,
+        )
+        print_results(tag_results, args.verbose)
+    elif "tag" in df.columns:
+        print("\n  TAG: No eligible samples")
+
     # Save detailed comparison if requested
     if args.output_csv:
-        comparison_df = df[[
+        comparison_cols = [
             "id", "description",
             "pred_sector", "sector",
             "pred_subcategory", "subcategory",
             "pred_type", "type",
+        ]
+        # Add tag columns if present
+        if "tag" in df.columns and "pred_tag" in df.columns:
+            comparison_cols.extend(["pred_tag", "tag"])
+        comparison_cols.extend([
             "pred_sector_conf", "pred_subcategory_conf", "pred_type_conf",
-            "notes",
-        ]].copy()
+        ])
+        if "pred_tag_conf" in df.columns:
+            comparison_cols.append("pred_tag_conf")
+        comparison_cols.append("notes")
+
+        comparison_df = df[[c for c in comparison_cols if c in df.columns]].copy()
 
         # Add match columns
         comparison_df["sector_match"] = comparison_df["pred_sector"] == comparison_df["sector"]
         comparison_df["subcategory_match"] = comparison_df["pred_subcategory"] == comparison_df["subcategory"]
         comparison_df["type_match"] = comparison_df["pred_type"] == comparison_df["type"]
+        if "tag" in df.columns and "pred_tag" in df.columns:
+            comparison_df["tag_match"] = comparison_df["pred_tag"] == comparison_df["tag"]
 
         comparison_df.to_csv(args.output_csv, index=False)
         print(f"\nDetailed comparison saved to: {args.output_csv}")
@@ -190,6 +221,8 @@ def main():
         print(f"  Subcategory Accuracy: {subcat_results['accuracy']*100:.2f}%")
     if type_mask.sum() > 0:
         print(f"  Type Accuracy:        {type_results['accuracy']*100:.2f}%")
+    if tag_results is not None:
+        print(f"  Tag Accuracy:         {tag_results['accuracy']*100:.2f}%")
 
     return 0
 

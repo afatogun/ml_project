@@ -13,7 +13,7 @@ import sys
 import numpy as np
 from dotenv import load_dotenv
 
-from src.preprocess import load_training_data, compute_data_hash
+from src.preprocess import load_training_data, compute_data_hash, apply_translation
 from src.openai_embeddings import batch_embed
 from src.train_models import stratified_split, train_all_classifiers, save_artifacts, SEED
 from src.metrics import evaluate_all, print_metrics
@@ -66,10 +66,21 @@ def main():
         help="Confidence threshold for type predictions",
     )
     parser.add_argument(
+        "--tag_threshold",
+        type=float,
+        default=0.60,
+        help="Confidence threshold for tag predictions",
+    )
+    parser.add_argument(
         "--test_size",
         type=float,
         default=0.10,
         help="Fraction of data to hold out for testing (default: 0.10 = 10%%)",
+    )
+    parser.add_argument(
+        "--translate",
+        action="store_true",
+        help="Enable Irish-to-English translation before training",
     )
 
     args = parser.parse_args()
@@ -85,17 +96,26 @@ def main():
     print("=" * 60)
 
     # 1. Load and preprocess data
-    print(f"\n[1/5] Loading training data from: {args.train_xlsx}")
+    print(f"\n[1/6] Loading training data from: {args.train_xlsx}")
     df = load_training_data(args.train_xlsx)
-    data_hash = compute_data_hash(df)
     print(f"  Loaded {len(df)} rows")
+
+    # 1.5. Apply translation if enabled
+    if args.translate:
+        print(f"\n[1.5/6] Applying Irish-to-English translation...")
+        df = apply_translation(df, text_column="description")
+        translated_count = df["translation_applied"].sum()
+        print(f"  Translated {translated_count} rows")
+
+    data_hash = compute_data_hash(df)
     print(f"  Data hash: {data_hash}")
     print(f"  Sectors: {df['sector'].nunique()}")
     print(f"  Subcategories: {df['subcategory'].nunique()} (eligible rows: {df['subcategory'].notna().sum()})")
     print(f"  Types: {df['type'].nunique()} (eligible rows: {df['type'].notna().sum()})")
+    print(f"  Tags: {df['tag'].nunique()} (eligible rows: {df['tag'].notna().sum()})")
 
     # 2. Compute embeddings
-    print(f"\n[2/5] Computing embeddings with {args.embedding_model}...")
+    print(f"\n[2/6] Computing embeddings with {args.embedding_model}...")
     descriptions = df["description"].tolist()
     embeddings = batch_embed(
         descriptions,
@@ -105,32 +125,32 @@ def main():
     print(f"  Embedding shape: {embeddings.shape}")
 
     # 3. Split data
-    print(f"\n[3/5] Creating stratified train/test split ({int((1-args.test_size)*100)}/{int(args.test_size*100)})...")
+    print(f"\n[3/6] Creating stratified train/test split ({int((1-args.test_size)*100)}/{int(args.test_size*100)})...")
     splits = stratified_split(df, embeddings, test_size=args.test_size)
     print(f"  Train: {len(splits['train']['df'])} rows ({int((1-args.test_size)*100)}%)")
     print(f"  Test:  {len(splits['test']['df'])} rows ({int(args.test_size*100)}% holdout for accuracy validation)")
 
     # 4. Train classifiers
-    print(f"\n[4/5] Training classifiers with {args.classifier}...")
+    print(f"\n[4/6] Training classifiers with {args.classifier}...")
     classifiers = train_all_classifiers(splits, classifier_type=args.classifier)
     for name, obj in classifiers.items():
         status = "trained" if obj["model"] is not None else "skipped (no eligible data)"
         print(f"  {name}: {status}")
 
     # 5. Evaluate
-    print("\n[5/5] Evaluating models...")
+    print("\n[5/6] Evaluating models...")
     os.makedirs(args.reports_dir, exist_ok=True)
     metrics = evaluate_all(classifiers, splits, args.reports_dir)
     print_metrics(metrics)
 
-    # Save artifacts
-    print("\n" + "=" * 60)
-    print("SAVING ARTIFACTS")
+    # 6. Save artifacts
+    print("\n[6/6] Saving artifacts...")
     print("=" * 60)
 
     thresholds = {
         "subcategory": args.subcategory_threshold,
         "type": args.type_threshold,
+        "tag": args.tag_threshold,
     }
 
     run_id = save_artifacts(

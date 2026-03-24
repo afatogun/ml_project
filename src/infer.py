@@ -114,7 +114,7 @@ def load_artifacts(model_dir: str) -> Dict[str, Any]:
     artifacts = {"metadata": metadata}
 
     # Load classifiers
-    for name in ["sector", "subcategory", "type"]:
+    for name in ["sector", "subcategory", "type", "tag"]:
         model_path = os.path.join(model_dir, f"{name}_model.joblib")
         encoder_path = os.path.join(model_dir, f"{name}_encoder.joblib")
 
@@ -184,6 +184,7 @@ def run_inference(
     descriptions: List[str] = None,
     subcategory_threshold: float = 0.60,
     type_threshold: float = 0.60,
+    tag_threshold: float = 0.60,
     apply_overrides: bool = True,
 ) -> pd.DataFrame:
     """
@@ -195,6 +196,7 @@ def run_inference(
         descriptions: Original text descriptions (for post-processing rules)
         subcategory_threshold: Confidence threshold for subcategory
         type_threshold: Confidence threshold for type
+        tag_threshold: Confidence threshold for tag
         apply_overrides: Whether to apply post-processing rules for Misc corrections
 
     Returns DataFrame with prediction columns.
@@ -209,6 +211,8 @@ def run_inference(
         "pred_subcategory_conf": [0.0] * n,
         "pred_type": [None] * n,
         "pred_type_conf": [0.0] * n,
+        "pred_tag": [None] * n,
+        "pred_tag_conf": [0.0] * n,
         "notes": [""] * n,
     }
 
@@ -287,5 +291,49 @@ def run_inference(
             else:
                 results["pred_type"][i] = type_preds[i]
                 results["pred_type_conf"][i] = round(type_confs[i], 4)
+
+    # 4. Tag prediction (gated by confidence, only predict "garage" when confident)
+    if artifacts.get("tag") and artifacts["tag"]["model"] is not None:
+        tag_model = artifacts["tag"]["model"]
+        tag_encoder = artifacts["tag"]["encoder"]
+
+        # Guardrail: if tag model was trained on a single class ("garage" only),
+        # it will predict garage for every row. Fall back to keyword-based tagging.
+        is_single_class_tag_model = (
+            tag_encoder is not None
+            and hasattr(tag_encoder, "classes_")
+            and len(tag_encoder.classes_) == 1
+            and str(tag_encoder.classes_[0]).lower() == "garage"
+        )
+
+        if is_single_class_tag_model:
+            garage_pattern = re.compile(r"\bgarage\b", flags=re.IGNORECASE)
+            for i in range(n):
+                desc = descriptions[i] if descriptions is not None else ""
+                if garage_pattern.search(desc or ""):
+                    results["pred_tag"][i] = "garage"
+                    results["pred_tag_conf"][i] = 1.0
+                else:
+                    results["pred_tag"][i] = None
+                    results["pred_tag_conf"][i] = 0.0
+        else:
+            tag_preds, tag_confs = predict_with_confidence(
+                tag_model,
+                tag_encoder,
+                embeddings,
+            )
+
+            for i in range(n):
+                # Only predict "garage" if confidence is above threshold
+                # and the model actually predicts "garage"
+                if tag_preds[i] == "garage" and tag_confs[i] >= tag_threshold:
+                    results["pred_tag"][i] = "garage"
+                    results["pred_tag_conf"][i] = round(tag_confs[i], 4)
+                else:
+                    results["pred_tag"][i] = None
+                    results["pred_tag_conf"][i] = round(tag_confs[i], 4) if tag_confs[i] > 0 else 0.0
+                    if tag_preds[i] == "garage" and tag_confs[i] < tag_threshold:
+                        note = f"Tag below threshold ({tag_confs[i]:.2f} < {tag_threshold})"
+                        results["notes"][i] = note if not results["notes"][i] else results["notes"][i] + "; " + note
 
     return pd.DataFrame(results)

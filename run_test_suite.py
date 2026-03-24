@@ -59,6 +59,12 @@ def main():
         help="Confidence threshold for type",
     )
     parser.add_argument(
+        "--tag_threshold",
+        type=float,
+        default=0.40,
+        help="Confidence threshold for tag",
+    )
+    parser.add_argument(
         "--test_size",
         type=float,
         default=0.10,
@@ -73,6 +79,11 @@ def main():
         "--model_dir",
         help="Model directory to use (required if --skip_train)",
     )
+    parser.add_argument(
+        "--translate",
+        action="store_true",
+        help="Enable Irish-to-English translation",
+    )
 
     args = parser.parse_args()
 
@@ -83,21 +94,25 @@ def main():
     print(f"  Training data: {args.train_xlsx}")
     print(f"  Embedding model: {args.embedding_model}")
     print(f"  Classifier: {args.classifier}")
-    print(f"  Thresholds: subcategory={args.subcategory_threshold}, type={args.type_threshold}")
+    print(f"  Thresholds: subcategory={args.subcategory_threshold}, type={args.type_threshold}, tag={args.tag_threshold}")
 
     model_dir = args.model_dir
 
     # Step 1: Train
     if not args.skip_train:
-        success = run_command([
+        train_cmd = [
             "python", "train.py",
             "--train_xlsx", args.train_xlsx,
             "--embedding_model", args.embedding_model,
             "--classifier", args.classifier,
             "--subcategory_threshold", str(args.subcategory_threshold),
             "--type_threshold", str(args.type_threshold),
+            "--tag_threshold", str(args.tag_threshold),
             "--test_size", str(args.test_size),
-        ], "STEP 1/4: Training models")
+        ]
+        if args.translate:
+            train_cmd.append("--translate")
+        success = run_command(train_cmd, "STEP 1/4: Training models")
 
         if not success:
             return 1
@@ -128,14 +143,18 @@ def main():
         return 1
 
     # Step 3: Run predictions
-    success = run_command([
+    predict_cmd = [
         "python", "predict_xlsx.py",
         "--model_dir", model_dir,
         "--input_xlsx", "./data/test/test_input.xlsx",
         "--output_xlsx", "./data/test/test_predictions.xlsx",
         "--subcategory_threshold", str(args.subcategory_threshold),
         "--type_threshold", str(args.type_threshold),
-    ], "STEP 3/4: Running predictions on test set")
+        "--tag_threshold", str(args.tag_threshold),
+    ]
+    if args.translate:
+        predict_cmd.append("--translate")
+    success = run_command(predict_cmd, "STEP 3/4: Running predictions on test set")
 
     if not success:
         return 1

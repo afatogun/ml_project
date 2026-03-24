@@ -13,7 +13,7 @@ import sys
 import pandas as pd
 from dotenv import load_dotenv
 
-from src.preprocess import load_inference_data
+from src.preprocess import load_inference_data, apply_translation
 from src.openai_embeddings import batch_embed
 from src.infer import load_artifacts, run_inference
 
@@ -53,6 +53,17 @@ def main():
         default=None,
         help="Override type confidence threshold (default: use model's threshold)",
     )
+    parser.add_argument(
+        "--tag_threshold",
+        type=float,
+        default=None,
+        help="Override tag confidence threshold (default: use model's threshold)",
+    )
+    parser.add_argument(
+        "--translate",
+        action="store_true",
+        help="Enable Irish-to-English translation before processing",
+    )
 
     args = parser.parse_args()
 
@@ -74,16 +85,25 @@ def main():
     # Determine thresholds
     subcategory_threshold = args.subcategory_threshold or metadata["thresholds"]["subcategory"]
     type_threshold = args.type_threshold or metadata["thresholds"]["type"]
+    tag_threshold = args.tag_threshold or metadata["thresholds"].get("tag", 0.60)
     print(f"  Subcategory threshold: {subcategory_threshold}")
     print(f"  Type threshold: {type_threshold}")
+    print(f"  Tag threshold: {tag_threshold}")
 
     # 2. Load input data
-    print(f"\n[2/4] Loading input data from: {args.input_xlsx}")
+    print(f"\n[2/5] Loading input data from: {args.input_xlsx}")
     df_input = load_inference_data(args.input_xlsx)
     print(f"  Loaded {len(df_input)} rows")
 
+    # 2.5. Apply translation if enabled
+    if args.translate:
+        print(f"\n[2.5/5] Applying Irish-to-English translation...")
+        df_input = apply_translation(df_input, text_column="description")
+        translated_count = df_input["translation_applied"].sum()
+        print(f"  Translated {translated_count} rows")
+
     # 3. Compute embeddings
-    print(f"\n[3/4] Computing embeddings...")
+    print(f"\n[3/5] Computing embeddings...")
     descriptions = df_input["description"].tolist()
     embeddings = batch_embed(
         descriptions,
@@ -93,19 +113,23 @@ def main():
     print(f"  Embedding shape: {embeddings.shape}")
 
     # 4. Run inference
-    print(f"\n[4/4] Running inference...")
+    print(f"\n[4/5] Running inference...")
     df_predictions = run_inference(
         embeddings=embeddings,
         artifacts=artifacts,
         descriptions=descriptions,
         subcategory_threshold=subcategory_threshold,
         type_threshold=type_threshold,
+        tag_threshold=tag_threshold,
         apply_overrides=True,
     )
 
     # Combine input with predictions
+    input_cols = ["id", "description"]
+    if "description_original" in df_input.columns:
+        input_cols.extend(["description_original", "translation_applied"])
     df_output = pd.concat([
-        df_input[["id", "description"]],
+        df_input[input_cols],
         df_predictions,
     ], axis=1)
 
@@ -115,15 +139,21 @@ def main():
     # Reorder columns
     column_order = [
         "id", "description",
+    ]
+    # Add translation columns if present
+    if "description_original" in df_output.columns:
+        column_order.extend(["description_original", "translation_applied"])
+    column_order.extend([
         "pred_sector", "pred_sector_conf",
         "pred_subcategory", "pred_subcategory_conf",
         "pred_type", "pred_type_conf",
+        "pred_tag", "pred_tag_conf",
         "notes", "model_version",
-    ]
-    df_output = df_output[column_order]
+    ])
+    df_output = df_output[[c for c in column_order if c in df_output.columns]]
 
     # Save output
-    print(f"\nSaving output to: {args.output_xlsx}")
+    print(f"\n[5/5] Saving output to: {args.output_xlsx}")
     df_output.to_excel(args.output_xlsx, index=False)
 
     # Summary
@@ -134,6 +164,8 @@ def main():
     print(f"  Sector predictions: {df_output['pred_sector'].notna().sum()}")
     print(f"  Subcategory predictions: {df_output['pred_subcategory'].notna().sum()}")
     print(f"  Type predictions: {df_output['pred_type'].notna().sum()}")
+    if "pred_tag" in df_output.columns:
+        print(f"  Tag predictions: {df_output['pred_tag'].notna().sum()}")
     print(f"  Rows with notes: {(df_output['notes'] != '').sum()}")
 
     print("\nPrediction complete!")
