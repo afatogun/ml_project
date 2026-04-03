@@ -148,7 +148,7 @@ def main():
         "pred_subcategory", "pred_subcategory_conf",
         "pred_type", "pred_type_conf",
         "pred_tag", "pred_tag_conf",
-        "notes", "model_version",
+        "notes", "manual_review", "model_version",
     ])
     df_output = df_output[[c for c in column_order if c in df_output.columns]]
 
@@ -166,6 +166,8 @@ def main():
     print(f"  Type predictions: {df_output['pred_type'].notna().sum()}")
     if "pred_tag" in df_output.columns:
         print(f"  Tag predictions: {df_output['pred_tag'].notna().sum()}")
+    if "manual_review" in df_output.columns:
+        print(f"  Rows flagged for manual review: {df_output['manual_review'].sum()}")
     print(f"  Rows with notes: {(df_output['notes'] != '').sum()}")
 
     print("\nPrediction complete!")

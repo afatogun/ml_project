@@ -25,6 +25,60 @@ SECTOR_SUBCATEGORIES = {
 }
 
 
+MISC_SECTOR = "Miscellaneous"
+MISC_EQUIVALENTS = {"miscellaneous", "shec"}
+
+# Rule signal groups
+STRONG_CONSTRUCTION = [
+    r"\bconstruction\b",
+    r"\berection\b",
+    r"\bnew\s+build\b",
+    r"\bnew\s+dwelling\b",
+    r"\bbuild(ing)?\b",
+    r"\binstallation\b",
+]
+
+WEAK_CONSTRUCTION = [
+    r"\bdevelopment\b",
+    r"\bworks\b",
+    r"\bextension\b",
+]
+
+RETENTION = [
+    r"\bretention\b",
+    r"\bretention\s+of\b",
+    r"\bpermission\s+for\s+retention\b",
+]
+
+VARIATION = [
+    r"\bvariation\s+of\s+condition\b",
+    r"\bvary\s+condition\b",
+    r"\bamend\s+condition\b",
+]
+
+PLANNING_REF_STRONG = [
+    r"\bplanning\s*ref(?:erence)?\s*[:\-]?\s*\w+",
+    r"\bref(?:erence)?\s*no\.?\s*[:\-]?\s*\w+",
+    r"\breg(?:istration)?\s*no\.?\s*[:\-]?\s*\w+",
+]
+
+PLANNING_REF_WEAK = [
+    r"\bunder\s*ref(?:erence)?\b",
+    r"\bplanning\s*ref(?:erence)?\b",
+]
+
+NON_CONSTRUCTION = [
+    r"\bchange\s+of\s+use\b",
+    r"\bretention\b",
+    r"\bpermission\s+for\s+retention\b",
+    r"\bregulari[sz]ation\b",
+    r"\bamendment\b",
+    r"\bmodification\b",
+    r"\bextension\s+of\s+duration\b",
+    r"\boutline\s+permission\b(?!.*construction)",
+]
+
+
 # Post-processing rules to correct obvious Miscellaneous misclassifications
 # Each rule: (sector_override, keywords_must_have, keywords_must_not_have)
 SECTOR_OVERRIDE_RULES = [
@@ -101,6 +155,99 @@ def apply_sector_override(description: str, predicted_sector: str, confidence: f
         return rule["sector"], f"Override: {rule['description']}"
 
     return predicted_sector, ""
+
+
+def _normalize_text(text: Optional[str]) -> str:
+    if text is None:
+        return ""
+    return str(text).strip().lower()
+
+
+def _matches_any(text: str, patterns: List[str]) -> bool:
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _is_misc_equivalent(sector: Optional[str]) -> bool:
+    if sector is None:
+        return False
+    return str(sector).strip().lower() in MISC_EQUIVALENTS
+
+
+def should_allow_misc_override(rule: str, sector_confidence: float, has_strong_construction: bool) -> bool:
+    high_confidence_rules = {"variation", "retention_only"}
+
+    if has_strong_construction:
+        return False
+
+    if rule in high_confidence_rules:
+        return True
+
+    if sector_confidence < 0.75:
+        return True
+
+    return False
+
+
+def apply_misc_rules(
+    description: str,
+    sector_pred: Optional[str],
+    sector_confidence: float,
+) -> Tuple[Optional[str], bool, List[str]]:
+    """
+    Apply deterministic Miscellaneous/SHEC rules after sector prediction.
+
+    Order:
+      1) planning reference detection
+      2) variation of condition
+      3) retention handling
+      4) no direct construction
+    """
+    text = _normalize_text(description)
+    notes: List[str] = []
+    manual_review = False
+
+    has_strong_construction = _matches_any(text, STRONG_CONSTRUCTION)
+    has_weak_construction = _matches_any(text, WEAK_CONSTRUCTION)
+    construction_present = has_strong_construction or has_weak_construction
+    has_retention = _matches_any(text, RETENTION)
+    has_variation = _matches_any(text, VARIATION)
+    has_non_construction = _matches_any(text, NON_CONSTRUCTION)
+
+    # 1) Manual review detection (planning references)
+    if _matches_any(text, PLANNING_REF_STRONG):
+        manual_review = True
+        notes.append("flagged: planning reference detected")
+    elif _matches_any(text, PLANNING_REF_WEAK) and not has_strong_construction:
+        manual_review = True
+        notes.append("flagged: planning reference detected")
+
+    # 2) Variation of condition -> Miscellaneous when gate allows
+    if has_variation:
+        if should_allow_misc_override("variation", sector_confidence, has_strong_construction):
+            sector_pred = MISC_SECTOR
+            notes.append("override: variation of condition → miscellaneous")
+        else:
+            notes.append("override skipped: high model confidence")
+
+    # 3) Retention handling
+    if has_retention and not has_strong_construction:
+        if should_allow_misc_override("retention_only", sector_confidence, False):
+            sector_pred = MISC_SECTOR
+            notes.append("override: retention only → miscellaneous")
+        else:
+            notes.append("override skipped: high model confidence")
+    elif has_retention and has_strong_construction:
+        notes.append("retention ignored due to construction")
+
+    # 4) No direct construction -> Miscellaneous when gate allows
+    if has_non_construction and not construction_present:
+        if should_allow_misc_override("no_construction", sector_confidence, False):
+            sector_pred = MISC_SECTOR
+            notes.append("override: no direct construction → miscellaneous")
+        else:
+            notes.append("override skipped: high model confidence")
+
+    return sector_pred, manual_review, notes
 
 
 def load_artifacts(model_dir: str) -> Dict[str, Any]:
@@ -213,6 +360,7 @@ def run_inference(
         "pred_type_conf": [0.0] * n,
         "pred_tag": [None] * n,
         "pred_tag_conf": [0.0] * n,
+        "manual_review": [False] * n,
         "notes": [""] * n,
     }
 
@@ -223,17 +371,37 @@ def run_inference(
         embeddings,
     )
 
-    # Apply post-processing overrides if descriptions provided
+    # Apply deterministic rule engine and post-processing overrides if descriptions provided
     if apply_overrides and descriptions is not None:
         for i in range(n):
-            corrected_sector, override_note = apply_sector_override(
+            original_sector = sector_preds[i]
+            updated_sector, manual_review, rule_notes = apply_misc_rules(
                 descriptions[i],
                 sector_preds[i],
-                sector_confs[i]
+                float(sector_confs[i]),
             )
-            if corrected_sector != sector_preds[i]:
-                sector_preds[i] = corrected_sector
-                results["notes"][i] = override_note
+
+            sector_preds[i] = updated_sector
+            results["manual_review"][i] = manual_review
+
+            if rule_notes:
+                results["notes"][i] = "; ".join(rule_notes)
+
+            # Preserve existing heuristic Misc correction only when no deterministic override changed sector.
+            if updated_sector == original_sector:
+                corrected_sector, override_note = apply_sector_override(
+                    descriptions[i],
+                    sector_preds[i],
+                    sector_confs[i],
+                )
+                if corrected_sector != sector_preds[i]:
+                    sector_preds[i] = corrected_sector
+                    if override_note:
+                        results["notes"][i] = (
+                            override_note
+                            if not results["notes"][i]
+                            else results["notes"][i] + "; " + override_note
+                        )
 
     results["pred_sector"] = sector_preds
     results["pred_sector_conf"] = np.round(sector_confs, 4)
@@ -249,10 +417,10 @@ def run_inference(
             sector = sector_preds[i]
 
             # Gate: if sector is Miscellaneous or not in the mapping, skip subcategory
-            if not sector or sector not in SECTOR_SUBCATEGORIES:
+            if not sector or _is_misc_equivalent(sector) or sector not in SECTOR_SUBCATEGORIES:
                 results["pred_subcategory"][i] = None
                 results["pred_subcategory_conf"][i] = 0.0
-                if sector and sector.lower() == "miscellaneous":
+                if sector and _is_misc_equivalent(sector):
                     notes.append("Subcategory skipped: Sector is Miscellaneous")
                 elif sector:
                     notes.append(f"Subcategory skipped: no valid subcategories for {sector}")

@@ -198,7 +198,11 @@ def main():
         ])
         if "pred_tag_conf" in df.columns:
             comparison_cols.append("pred_tag_conf")
+        if "model_version" in df.columns:
+            comparison_cols.append("model_version")
         comparison_cols.append("notes")
+        if "manual_review" in df.columns:
+            comparison_cols.append("manual_review")
 
         comparison_df = df[[c for c in comparison_cols if c in df.columns]].copy()
 

@@ -9,6 +9,11 @@ Train and batch-predict project classifications (Sector, Subcategory, Type, Tag)
   - Sector classifier (always predicts)
   - Subcategory classifier (skipped if Sector=Miscellaneous or confidence below threshold)
   - Type classifier (skipped if confidence below threshold)
+- **Deterministic Miscellaneous/SHEC Rule Engine (Inference-Time)**:
+  - Treats `SHEC` as `Miscellaneous` for rule behavior
+  - Flags planning-reference cases for manual review
+  - Applies confidence-aware Miscellaneous overrides for variation/retention/admin cases
+  - Preserves high-confidence model predictions via override guardrails
 - **Tag Classification**:
   - Tag classifier trained as a real ML target
   - Current valid tag: `garage`
@@ -159,6 +164,7 @@ python predict_xlsx.py \
 | `pred_type_conf` | Type confidence (0-1) |
 | `pred_tag` | Predicted tag (or null) |
 | `pred_tag_conf` | Tag confidence (0-1) |
+| `manual_review` | Boolean flag for rows requiring manual review |
 | `description_original` | Original text (when translation enabled) |
 | `translation_applied` | Translation flag (when translation enabled) |
 | `notes` | Gating/threshold notes |
@@ -175,6 +181,22 @@ python predict_xlsx.py \
 4. **Tag**:
   - Predicted only when model predicts `garage` and confidence >= threshold
   - Otherwise returned as null
+5. **Miscellaneous/SHEC Rule Engine** (after sector prediction, before subcategory filtering):
+  - Rule order:
+    - planning reference detection (sets `manual_review=true`)
+    - variation of condition
+    - retention handling
+    - no direct construction
+  - Override guardrail:
+    - strong construction signals block Miscellaneous override
+    - weak overrides are skipped when sector confidence is high
+  - Notes include deterministic audit strings, for example:
+    - `flagged: planning reference detected`
+    - `override: variation of condition → miscellaneous`
+    - `override: retention only → miscellaneous`
+    - `override: no direct construction → miscellaneous`
+    - `override skipped: high model confidence`
+    - `retention ignored due to construction`
 
 ## Example Workflow
 
