@@ -10,3 +10,4 @@ tenacity>=8.2.0
 python-dotenv>=1.0.0
 numpy>=1.24.0
 lightgbm>=4.0.0
+scipy>=1.10.0

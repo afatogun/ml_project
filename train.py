@@ -9,13 +9,14 @@ Usage:
 import argparse
 import os
 import sys
+from datetime import datetime
 
 import numpy as np
 from dotenv import load_dotenv
 
 from src.preprocess import load_training_data, compute_data_hash, apply_translation
 from src.openai_embeddings import batch_embed
-from src.train_models import stratified_split, train_all_classifiers, save_artifacts, SEED
+from src.train_models import stratified_split, train_all_classifiers, save_artifacts, save_split_manifest, SEED
 from src.metrics import evaluate_all, print_metrics
 
 
@@ -130,6 +131,10 @@ def main():
     print(f"  Train: {len(splits['train']['df'])} rows ({int((1-args.test_size)*100)}%)")
     print(f"  Test:  {len(splits['test']['df'])} rows ({int(args.test_size*100)}% holdout for accuracy validation)")
 
+    report_run_dir = os.path.join(args.reports_dir, datetime.now().strftime("%Y%m%d_%H%M%S"))
+    split_manifest_path = save_split_manifest(splits, report_run_dir)
+    print(f"  Split manifest: {split_manifest_path}")
+
     # 4. Train classifiers
     print(f"\n[4/6] Training classifiers with {args.classifier}...")
     classifiers = train_all_classifiers(splits, classifier_type=args.classifier)
@@ -139,8 +144,8 @@ def main():
 
     # 5. Evaluate
     print("\n[5/6] Evaluating models...")
-    os.makedirs(args.reports_dir, exist_ok=True)
-    metrics = evaluate_all(classifiers, splits, args.reports_dir)
+    os.makedirs(report_run_dir, exist_ok=True)
+    metrics = evaluate_all(classifiers, splits, report_run_dir)
     print_metrics(metrics)
 
     # 6. Save artifacts
@@ -161,10 +166,11 @@ def main():
         metrics=metrics,
         thresholds=thresholds,
         classifier_type=args.classifier,
+        test_indices=splits["test"]["indices"],
     )
 
     print(f"\nArtifacts saved to: {os.path.join(args.output_dir, run_id)}")
-    print(f"Confusion matrices saved to: {args.reports_dir}")
+    print(f"Reports saved to: {report_run_dir}")
     print("\nTraining complete!")
 
     return 0

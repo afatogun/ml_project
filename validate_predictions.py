@@ -203,6 +203,12 @@ def main():
         comparison_cols.append("notes")
         if "manual_review" in df.columns:
             comparison_cols.append("manual_review")
+        if "manual_review_reason" in df.columns:
+            comparison_cols.append("manual_review_reason")
+        if "ai_manual_review_confidence" in df.columns:
+            comparison_cols.append("ai_manual_review_confidence")
+        if "ai_manual_review_rationale" in df.columns:
+            comparison_cols.append("ai_manual_review_rationale")
 
         comparison_df = df[[c for c in comparison_cols if c in df.columns]].copy()
 

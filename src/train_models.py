@@ -36,13 +36,7 @@ def stratified_split(
     """
     np.random.seed(SEED)
 
-    # Split: train vs test (90/10)
-    train_idx, test_idx = train_test_split(
-        np.arange(len(df)),
-        test_size=test_size,
-        stratify=df["sector"],
-        random_state=SEED,
-    )
+    train_idx, test_idx = stratified_split_indices(df, test_size=test_size)
 
     return {
         "train": {
@@ -55,7 +49,65 @@ def stratified_split(
             "embeddings": embeddings[test_idx],
             "indices": test_idx,
         },
+        "seed": SEED,
+        "test_size": test_size,
     }
+
+
+def stratified_split_indices(
+    df: pd.DataFrame,
+    test_size: float = 0.10,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return reproducible stratified train/test indices by sector."""
+    np.random.seed(SEED)
+
+    train_idx, test_idx = train_test_split(
+        np.arange(len(df)),
+        test_size=test_size,
+        stratify=df["sector"],
+        random_state=SEED,
+    )
+    return train_idx, test_idx
+
+
+def save_split_manifest(
+    splits: Dict[str, Any],
+    reports_dir: str,
+) -> str:
+    """Persist split membership for reproducible benchmarking."""
+    os.makedirs(reports_dir, exist_ok=True)
+
+    rows = []
+    for split_name in ["train", "test"]:
+        split_df = splits[split_name]["df"]
+        split_indices = splits[split_name]["indices"]
+        for split_row, original_index in zip(split_df.itertuples(index=False), split_indices):
+            rows.append({
+                "split": split_name,
+                "original_index": int(original_index),
+                "id": getattr(split_row, "id", None),
+                "sector": getattr(split_row, "sector", None),
+                "description": getattr(split_row, "description", None),
+            })
+
+    manifest_df = pd.DataFrame(rows)
+    output_path = os.path.join(reports_dir, "split_manifest.csv")
+    manifest_df.to_csv(output_path, index=False)
+
+    metadata_path = os.path.join(reports_dir, "split_metadata.json")
+    with open(metadata_path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "seed": splits.get("seed", SEED),
+                "test_size": splits.get("test_size"),
+                "n_train": int(len(splits["train"]["df"])),
+                "n_test": int(len(splits["test"]["df"])),
+            },
+            handle,
+            indent=2,
+        )
+
+    return output_path
 
 
 def train_classifier(
@@ -188,11 +240,16 @@ def save_artifacts(
     metrics: Dict[str, Any],
     thresholds: Dict[str, float],
     classifier_type: str = "lightgbm",
+        test_indices: Optional[np.ndarray] = None,
 ) -> str:
     """
     Save all artifacts to output directory.
 
-    Returns the run_id.
+
+        Args:
+            test_indices: Optional test indices for reproducible validation.
+
+        Returns the run_id.
     """
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     artifact_dir = os.path.join(output_dir, run_id)
@@ -203,6 +260,10 @@ def save_artifacts(
         if obj["model"] is not None:
             joblib.dump(obj["model"], os.path.join(artifact_dir, f"{name}_model.joblib"))
             joblib.dump(obj["encoder"], os.path.join(artifact_dir, f"{name}_encoder.joblib"))
+
+    # Save test indices if provided (for reproducible validation)
+    if test_indices is not None:
+        np.save(os.path.join(artifact_dir, "split_indices.npy"), test_indices)
 
     # Save metadata
     metadata = {
@@ -217,6 +278,8 @@ def save_artifacts(
             name: obj["model"] is not None
             for name, obj in classifiers.items()
         },
+        "test_indices_count": len(test_indices) if test_indices is not None else None,
+        "test_indices_file": "split_indices.npy" if test_indices is not None else None,
     }
 
     with open(os.path.join(artifact_dir, "metadata.json"), "w") as f:

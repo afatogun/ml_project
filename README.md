@@ -1,230 +1,122 @@
-# Project Classification with OpenAI Embeddings
+# Supervised Project Classification
 
-Train and batch-predict project classifications (Sector, Subcategory, Type, Tag) using OpenAI embeddings and lightweight classifiers.
+Train and evaluate supervised sector classification using OpenAI embeddings and reproducible holdout sampling.
 
-## Features
+## Supported Workflow (Supervised Only)
 
-- **OpenAI Embeddings**: Uses `text-embedding-3-large` by default (configurable) for semantic representations
-- **Gated Hierarchical Classification**:
-  - Sector classifier (always predicts)
-  - Subcategory classifier (skipped if Sector=Miscellaneous or confidence below threshold)
-  - Type classifier (skipped if confidence below threshold)
-- **Deterministic Miscellaneous/SHEC Rule Engine (Inference-Time)**:
-  - Treats `SHEC` as `Miscellaneous` for rule behavior
-  - Flags planning-reference cases for manual review
-  - Applies confidence-aware Miscellaneous overrides for variation/retention/admin cases
-  - Preserves high-confidence model predictions via override guardrails
-- **Tag Classification**:
-  - Tag classifier trained as a real ML target
-  - Current valid tag: `garage`
-  - Predicted only when model predicts `garage` above confidence threshold
-- **Batch Processing**: Rate-limit friendly with exponential backoff retries
-- **Irish Translation (Optional)**:
-  - If text is Irish, translate to English via OpenAI before embedding/classification
-  - If text is English, no translation is applied
-  - Preserves original text and sets `translation_applied` flag
-- **Reproducibility**: Deterministic seeds, data hashing, model versioning
+- Train supervised sector bundle: `train_supervised_sector.py`
+- Run end-to-end evaluation: `run_test_suite.py`
+- Batch predict from existing supervised bundle: `predict_supervised.py`
+- Validate predictions: `validate_ai.py`
+
+Legacy GPT-only and legacy predictor routes are archived.
 
 ## Project Structure
 
-```
+```text
 ml_project/
-├── train.py                 # Training entry point
-├── predict_xlsx.py          # Batch prediction entry point
-├── clean_misc_mislabeled.py # Remove likely mislabeled Miscellaneous rows
+├── train_supervised_sector.py
+├── predict_supervised.py
+├── run_test_suite.py
+├── create_test_input.py
+├── validate_ai.py
 ├── src/
-│   ├── __init__.py
-│   ├── openai_embeddings.py # Batch embed + Irish translation with retries
-│   ├── preprocess.py        # Data loading and normalization
-│   ├── train_models.py      # Model training utilities
-│   ├── metrics.py           # Evaluation and reporting
-│   └── infer.py             # Inference utilities
-├── artifacts/               # Saved models (per run_id)
-├── reports/                 # Confusion matrices
+│   ├── openai_embeddings.py
+│   ├── preprocess.py
+│   ├── supervised_candidates.py
+│   ├── supervised_runtime.py
+│   └── train_models.py
+├── artifacts/
+├── reports/
 ├── data/
-│   ├── raw/                 # Input data
-│   └── processed/           # Processed data
 ├── requirements.txt
-├── .env.example
-└── README.md
+└── .env.example
 ```
 
-## Installation
+## Setup
 
 ```bash
-# Create virtual environment (Python 3.11+)
 python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-# or
-.venv\Scripts\activate     # Windows
-
-# Install dependencies
+.venv\Scripts\activate
 pip install -r requirements.txt
-
-# Set up environment variables
-cp .env.example .env
-# Edit .env and add your OpenAI API key
+copy .env.example .env
 ```
+
+Set `OPENAI_API_KEY` in `.env`.
 
 ## Training
 
-### Input Format
+### Input
 
-Training dataset (XLSX or CSV) must have columns:
-- `id`: Unique identifier
-- `Sector`: Primary category (required)
-- `subcategory`: Secondary category (optional)
-- `type`: Tertiary category (optional)
-- `Description`: Text description for embedding
-- `tag`: Optional tag target (currently only `garage` is valid)
-
-### Optional cleaning step (recommended)
-
-```bash
-python clean_misc_mislabeled.py \
-  --train_xlsx ./data/raw/2025_classification_training_set.xlsx \
-  --cleaned_output ./data/raw/2025_classification_training_set.cleaned.xlsx \
-  --removed_output ./data/raw/misc_removed.csv \
-  --confidence_threshold 0.8
-```
+Training dataset (XLSX/CSV) must include:
+- `id`
+- `Sector`
+- `Description`
+- optional: `subcategory`, `type`, `tag`
 
 ### Command
 
 ```bash
-python train.py --train_xlsx ./data/raw/2025_classification_training_set.cleaned.xlsx --test_size 0.10
+python train_supervised_sector.py \
+  --train_xlsx ./data/raw/2025_classification_training_set.xlsx \
+  --embedding_model text-embedding-3-large \
+  --candidate mlp_embedding_rule
 ```
-
-### Options
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--train_xlsx` | (required) | Path to training XLSX |
-| `--embedding_model` | `text-embedding-3-large` | OpenAI embedding model |
-| `--classifier` | `lightgbm` | Classifier (`lightgbm`, `random_forest`, `logistic`) |
-| `--batch_size` | `100` | Texts per API call |
-| `--output_dir` | `./artifacts` | Model artifacts directory |
-| `--reports_dir` | `./reports` | Evaluation reports directory |
-| `--subcategory_threshold` | `0.60` | Confidence threshold for subcategory |
-| `--type_threshold` | `0.60` | Confidence threshold for type |
-| `--tag_threshold` | `0.60` | Confidence threshold for tag |
-| `--test_size` | `0.10` | Holdout fraction for evaluation |
-| `--translate` | `False` | Enable Irish-to-English translation before training |
 
 ### Output
 
-- `./artifacts/<run_id>/`: Model files and metadata
-  - `sector_model.joblib`, `sector_encoder.joblib`
-  - `subcategory_model.joblib`, `subcategory_encoder.joblib`
-  - `type_model.joblib`, `type_encoder.joblib`
-  - `tag_model.joblib`, `tag_encoder.joblib`
-  - `metadata.json`: Configuration and metrics
-- `./reports/`: Confusion matrices (CSV)
+Saved in `./artifacts/<run_id>_supervised/`:
+- `sector_supervised_bundle.joblib`
+- `metadata.json`
+- `split_indices.npy` (canonical held-out 10% indices)
+
+## End-to-End Evaluation
+
+```bash
+python run_test_suite.py \
+  --skip_train \
+  --model_dir ./artifacts/<run_id>_supervised \
+  --train_xlsx ./data/raw/2025_classification_training_set.xlsx \
+  --sample_size 1000 \
+  --sample_source stratified_test \
+  --random_mode
+```
+
+Notes:
+- `--sample_source stratified_test` samples only from the saved holdout split when `split_indices.npy` exists.
+- `--random_mode` changes sample draw each run while staying inside the same holdout pool.
 
 ## Batch Prediction
 
-### Input Format
-
-Scoring file (XLSX or CSV) must have columns:
-- `id`: Unique identifier
-- `description`: Text description for embedding
-
-### Command
-
 ```bash
-python predict_xlsx.py \
-    --model_dir ./artifacts/20240115_120000 \
-    --input_xlsx input.xlsx \
-    --output_xlsx output.xlsx
+python predict_supervised.py \
+  --model_dir ./artifacts/<run_id>_supervised \
+  --input_xlsx ./data/test/<run_id>/test_input.xlsx \
+  --output_xlsx ./data/test/<run_id>/test_predictions.xlsx
 ```
 
-### Options
+Output columns include:
+- `pred_sector`, `pred_sector_conf`
+- `top_3_predicted_sectors`, `top_3_predicted_probs`
+- `prediction_source`, `model_version`, `candidate_name`
+- `pred_tag` (currently defaults to `none`)
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--model_dir` | (required) | Path to artifacts directory |
-| `--input_xlsx` | (required) | Input XLSX path |
-| `--output_xlsx` | (required) | Output XLSX path |
-| `--batch_size` | `100` | Texts per API call |
-| `--subcategory_threshold` | (from model) | Override confidence threshold |
-| `--type_threshold` | (from model) | Override confidence threshold |
-| `--tag_threshold` | (from model) | Override tag confidence threshold |
-| `--translate` | `False` | Enable Irish-to-English translation before prediction |
-
-### Output Columns
-
-| Column | Description |
-|--------|-------------|
-| `id` | Original ID |
-| `description` | Original description |
-| `pred_sector` | Predicted sector |
-| `pred_sector_conf` | Sector confidence (0-1) |
-| `pred_subcategory` | Predicted subcategory (or null) |
-| `pred_subcategory_conf` | Subcategory confidence (0-1) |
-| `pred_type` | Predicted type (or null) |
-| `pred_type_conf` | Type confidence (0-1) |
-| `pred_tag` | Predicted tag (or null) |
-| `pred_tag_conf` | Tag confidence (0-1) |
-| `manual_review` | Boolean flag for rows requiring manual review |
-| `description_original` | Original text (when translation enabled) |
-| `translation_applied` | Translation flag (when translation enabled) |
-| `notes` | Gating/threshold notes |
-| `model_version` | Run ID of model used |
-
-## Gating Rules
-
-1. **Sector**: Always predicted
-2. **Subcategory**:
-   - Skipped if `pred_sector == "Miscellaneous"` (note added)
-   - Skipped if confidence < threshold (note added)
-3. **Type**:
-   - Skipped if confidence < threshold (note added)
-4. **Tag**:
-  - Predicted only when model predicts `garage` and confidence >= threshold
-  - Otherwise returned as null
-5. **Miscellaneous/SHEC Rule Engine** (after sector prediction, before subcategory filtering):
-  - Rule order:
-    - planning reference detection (sets `manual_review=true`)
-    - variation of condition
-    - retention handling
-    - no direct construction
-  - Override guardrail:
-    - strong construction signals block Miscellaneous override
-    - weak overrides are skipped when sector confidence is high
-  - Notes include deterministic audit strings, for example:
-    - `flagged: planning reference detected`
-    - `override: variation of condition → miscellaneous`
-    - `override: retention only → miscellaneous`
-    - `override: no direct construction → miscellaneous`
-    - `override skipped: high model confidence`
-    - `retention ignored due to construction`
-
-## Example Workflow
+## Validation
 
 ```bash
-# 1. Clean mislabeled Miscellaneous rows
-python clean_misc_mislabeled.py \
-  --train_xlsx ./data/raw/2025_classification_training_set.xlsx \
-  --cleaned_output ./data/raw/2025_classification_training_set.cleaned.xlsx
-
-# 2. Train models with 90/10 split
-python train.py --train_xlsx ./data/raw/2025_classification_training_set.cleaned.xlsx --test_size 0.10
-
-# 3. Check artifacts
-ls ./artifacts/
-
-# 4. Run predictions
-python predict_xlsx.py \
-    --model_dir ./artifacts/20260119_143022 \
-    --input_xlsx ./data/raw/new_projects.xlsx \
-    --output_xlsx ./data/processed/predictions.xlsx
+python validate_ai.py \
+  --predictions ./data/test/<run_id>/test_predictions.xlsx \
+  --truth ./data/test/<run_id>/test_ground_truth.xlsx \
+  --output-dir ./reports \
+  --run-id <run_id>
 ```
 
-## Environment Variables
+## Reproducibility Guarantees
 
-| Variable | Description |
-|----------|-------------|
-| `OPENAI_API_KEY` | OpenAI API key (required) |
+- Deterministic split seed for training holdout
+- Persisted holdout indices in artifact (`split_indices.npy`)
+- Dataset hash compatibility checks in `run_test_suite.py`
 
-## License
+## Retention Policy
 
-MIT
+Active directories keep latest run per family; older runs are archived under `archive/`.

@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 import joblib
 
+from .openai_embeddings import batch_semantic_manual_review
+
 
 # Valid sector → subcategory mapping
 SECTOR_SUBCATEGORIES = {
@@ -76,6 +78,23 @@ NON_CONSTRUCTION = [
     r"\bmodification\b",
     r"\bextension\s+of\s+duration\b",
     r"\boutline\s+permission\b(?!.*construction)",
+]
+
+PRIOR_PERMISSION_SIGNALS = [
+    r"\bpreviously\s+approved\b",
+    r"\bapproved\s+under\b",
+    r"\bgranted\s+permission\b",
+    r"\bmaterial\s+amendment\b",
+    r"\bamendment\s+to\b",
+    r"\bamendments\s+to\b",
+    r"\bchange\s+of\s+house\s+type\b",
+    r"\bvary\s+condition\b",
+    r"\bvariation\s+of\s+condition\b",
+    r"\bsection\s+54\b",
+    r"\bretention\s+permission\b",
+    r"\bsubject\s+to\s+condition\b",
+    r"\bcondition\s+no\b",
+    r"\bin\s+accordance\s+with\s+approved\b",
 ]
 
 
@@ -192,7 +211,7 @@ def apply_misc_rules(
     description: str,
     sector_pred: Optional[str],
     sector_confidence: float,
-) -> Tuple[Optional[str], bool, List[str]]:
+) -> Tuple[Optional[str], bool, Optional[str], List[str]]:
     """
     Apply deterministic Miscellaneous/SHEC rules after sector prediction.
 
@@ -205,6 +224,7 @@ def apply_misc_rules(
     text = _normalize_text(description)
     notes: List[str] = []
     manual_review = False
+    manual_review_reason: Optional[str] = None
 
     has_strong_construction = _matches_any(text, STRONG_CONSTRUCTION)
     has_weak_construction = _matches_any(text, WEAK_CONSTRUCTION)
@@ -213,12 +233,18 @@ def apply_misc_rules(
     has_variation = _matches_any(text, VARIATION)
     has_non_construction = _matches_any(text, NON_CONSTRUCTION)
 
-    # 1) Manual review detection (planning references)
-    if _matches_any(text, PLANNING_REF_STRONG):
+    # 1) Manual review detection (deterministic prior permission references)
+    if _matches_any(text, PRIOR_PERMISSION_SIGNALS):
         manual_review = True
+        manual_review_reason = "prior_permission_reference"
+        notes.append("flagged: prior permission reference detected")
+    elif _matches_any(text, PLANNING_REF_STRONG):
+        manual_review = True
+        manual_review_reason = "planning_reference_detected"
         notes.append("flagged: planning reference detected")
     elif _matches_any(text, PLANNING_REF_WEAK) and not has_strong_construction:
         manual_review = True
+        manual_review_reason = "planning_reference_detected"
         notes.append("flagged: planning reference detected")
 
     # 2) Variation of condition -> Miscellaneous when gate allows
@@ -247,7 +273,7 @@ def apply_misc_rules(
         else:
             notes.append("override skipped: high model confidence")
 
-    return sector_pred, manual_review, notes
+    return sector_pred, manual_review, manual_review_reason, notes
 
 
 def load_artifacts(model_dir: str) -> Dict[str, Any]:
@@ -361,6 +387,9 @@ def run_inference(
         "pred_tag": [None] * n,
         "pred_tag_conf": [0.0] * n,
         "manual_review": [False] * n,
+        "manual_review_reason": [None] * n,
+        "ai_manual_review_confidence": [None] * n,
+        "ai_manual_review_rationale": [None] * n,
         "notes": [""] * n,
     }
 
@@ -373,16 +402,37 @@ def run_inference(
 
     # Apply deterministic rule engine and post-processing overrides if descriptions provided
     if apply_overrides and descriptions is not None:
+        ai_review_results = batch_semantic_manual_review(
+            descriptions,
+            model="gpt-4o-mini",
+        )
+
         for i in range(n):
             original_sector = sector_preds[i]
-            updated_sector, manual_review, rule_notes = apply_misc_rules(
+            updated_sector, manual_review, manual_review_reason, rule_notes = apply_misc_rules(
                 descriptions[i],
                 sector_preds[i],
                 float(sector_confs[i]),
             )
 
+            ai_result = ai_review_results[i]
+
             sector_preds[i] = updated_sector
             results["manual_review"][i] = manual_review
+            results["manual_review_reason"][i] = manual_review_reason
+            results["ai_manual_review_confidence"][i] = round(ai_result.confidence, 4)
+            results["ai_manual_review_rationale"][i] = ai_result.rationale
+
+            # AI semantic escalation runs on all rows; deterministic reasons take precedence.
+            if ai_result.manual_review:
+                if not results["manual_review"][i]:
+                    results["manual_review"][i] = True
+                    if ai_result.reason:
+                        results["manual_review_reason"][i] = ai_result.reason
+                    ai_note = "flagged: ai semantic ambiguity detected"
+                    rule_notes.append(ai_note)
+                elif not results["manual_review_reason"][i] and ai_result.reason:
+                    results["manual_review_reason"][i] = ai_result.reason
 
             if rule_notes:
                 results["notes"][i] = "; ".join(rule_notes)
